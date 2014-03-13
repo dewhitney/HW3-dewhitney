@@ -1,0 +1,136 @@
+Homework 3
+========================================================
+
+We are going to analyze the data from:
+Henn, A. D. et al. High-resolution temporal response patterns to influenza vaccine reveal a distinct human plasma cell gene signature. Scientific Reports 3, 2327 (2013).
+
+0. Make sure all the necessary libraries are ready.
+```{r}
+library(GEOquery)
+library(CAMERA)
+library(limma)
+library(pheatmap)
+library(GSEABase)
+```
+
+
+Download the data. Run Raphael's cleaning script from RNA-seq lecture. Make sure that the Data subdirectory exists in your working directory. Uncomment the `getGEOSuppFiles` call the first time you knit this document, but note that the T14 file that is downloaded has errors and you will have to manually fix the file each time you overwrite this data.
+
+```{r}
+gd <- getGEO("GSE45735", destdir = "Data/")
+pd <- pData(gd[[1]])
+#getGEOSuppFiles("GSE45735", makeDirectory=FALSE, baseDir = "Data/")
+# The T14 file is problematic and needs to be fixed by hand
+# Open the file, go to the bottom and remove the few inconsistent line at the end
+
+# Note the regular expression to grep file names
+files <- list.files(path = "Data/", pattern = "GSE45735_T.*.gz", full.names = TRUE)
+file_list <- lapply(files, read.table, header=TRUE)
+# Remove duplicated rows
+file_list_unique <- lapply(file_list, function(x){x<-x[!duplicated(x$Gene),]; 
+                                                  x <- x[order(x$Gene),]; 
+                                                  rownames(x) <- x$Gene;
+                                                  x[,-1]})
+# Take the intersection of all genes
+gene_list <- Reduce(intersect, lapply(file_list_unique, rownames))
+file_list_unique <- lapply(file_list_unique, "[", gene_list,)
+matrix <- as.matrix(do.call(cbind, file_list_unique))
+
+# Clean up the pData
+pd_small <- pd[!grepl("T13_Day8",pd$title),]
+pd_small$Day <- sapply(strsplit(gsub(" \\[PBMC\\]", "", pd_small$title),"_"),"[",2)
+pd_small$subject <- sapply(strsplit(gsub(" \\[PBMC\\]", "", pd_small$title),"_"),"[",1)
+colnames(matrix) <- rownames(pd_small)
+
+```
+
+We will use the `voom` function to estimate the weights for our differential expression analysis.
+
+```{r}
+# Note that I add one to the count
+new_set <- ExpressionSet(assayData = matrix+1)
+pData(new_set) <- pd_small
+design <- model.matrix(~subject+Day, new_set)
+new_set_voom <- voom(new_set,design = design)
+```
+
+Now we use `lmFit` from `limma` on the normalized expression set and follow this with `eBayes` for inference on the estimates. We identify which genes 
+are differentially expressed when we control FDR at 0.01.
+
+```{r}
+lm <- lmFit(new_set_voom, design)
+eb <- eBayes(lm)
+# Look at genes each day with adjusted significance < .01
+day1 = topTable(eb, coef="DayDay1", p.value=.01, number=Inf)
+day2 = topTable(eb, coef="DayDay2", p.value=.01, number=Inf)
+day3 = topTable(eb, coef="DayDay3", p.value=.01, number=Inf)
+day4 = topTable(eb, coef="DayDay4", p.value=.01, number=Inf)
+day5 = topTable(eb, coef="DayDay5", p.value=.01, number=Inf)
+day6 = topTable(eb, coef="DayDay6", p.value=.01, number=Inf)
+day7 = topTable(eb, coef="DayDay7", p.value=.01, number=Inf)
+day8 = topTable(eb, coef="DayDay8", p.value=.01, number=Inf)
+day9 = topTable(eb, coef="DayDay9", p.value=.01, number=Inf)
+day10 = topTable(eb, coef="DayDay10", p.value=.01, number=Inf)
+
+```
+
+Hm. Only `day1` has more than 1 differentially expressed gene (it has 58, in fact!). We are interested in a heatmap to display the log fold-change of the gene expression for these genes relative to day 0. Though they were generally no longer significant at our FDR of 0.01 after day 1, it may be of interest to observe the evolution of the log fold-change of these genes over the 10 days of follow up.
+
+```{r fig.width=7, fig.height=6}
+lfc = matrix(0,nrow=58,ncol=10)
+lfc[,1] = day1$logFC
+lfc[,2] = topTable(eb, coef="DayDay2", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,3] = topTable(eb, coef="DayDay3", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,4] = topTable(eb, coef="DayDay4", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,5] = topTable(eb, coef="DayDay5", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,6] = topTable(eb, coef="DayDay6", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,7] = topTable(eb, coef="DayDay7", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,8] = topTable(eb, coef="DayDay8", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,9] = topTable(eb, coef="DayDay9", genelist=rownames(day1), number=58, sort.by="none")$logFC
+lfc[,10] = topTable(eb, coef="DayDay10", genelist=rownames(day1), number=58, sort.by="none")$logFC
+days = paste("Day",1:10,sep=" ")
+colnames(lfc) = days
+rownames(lfc) = rownames(day1)
+```
+
+The heatmap for the log fold-change ends up looking very intense on day 1, followed by immediate attenuation to zero on subsequent days.
+
+```{r}
+pheatmap(lfc,cluster_rows=TRUE,cluster_cols=FALSE,show_rownames=TRUE,show_colnames=TRUE,main="Log Fold-Change Over Study for Genes with DE on Day 1")
+```
+
+We are now interested in performing GSEA analysis for this data using `camera`. Fortunately, much of the work has already been done (we already have done the linear modeling and empirical Bayes). We do need to have some gene sets ready from `GSEABase` in order to carry out the analysis, though. The rest of this code is thanks to the lecture notes.
+
+```{r}
+c2_set <- getGmt("Data/c2.all.v4.0.symbols.gmt")
+gene_ids <- geneIds(c2_set)
+# Camera requires gene-indices
+sets_indices <- symbols2indices(gene_ids, rownames(new_set))
+```
+
+```{r}
+# Note that camera works on voom objects
+res <- vector("list",length = 10)
+for(i in 1:10)
+  {
+  contrast <- paste0("DayDay",i)
+  cont_matrix <- makeContrasts(contrast, levels=design)
+  res[[i]] <- camera(new_set_voom, sets_indices, design=design, contrast=cont_matrix, sort=FALSE)
+}
+
+PValue <- sapply(res, function(x){ifelse(x$Direction=="Up", -10*log10(x$PValue), 10*log10(x$PValue))})
+rownames(PValue) <- rownames(res[[1]])
+PValue_max <- rowMax(abs(PValue))
+PValue_small <- PValue[PValue_max>30, ]
+anno <- data.frame(Time=paste0("Day",1:10))
+rownames(anno) <- colnames(PValue_small)  <- paste0("Day",1:10)
+```
+
+We can now visualize the gene set expression over the course of the study in terms of their siginificance levels.
+```{r}
+pheatmap(PValue_small, cluster_cols=FALSE, annotation=anno, show_colnames=FALSE, show_rownames=FALSE)
+```
+
+```{r}
+sessionInfo()
+```
